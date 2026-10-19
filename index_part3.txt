@@ -1,0 +1,200 @@
+}
+__name(delUser, "delUser");
+async function setBlocked(env, tid, blocked, by) {
+  await env.DB.batch([
+    env.DB.prepare("UPDATE admins SET blocked=? WHERE telegram_id=?").bind(blocked ? 1 : 0, +tid),
+    env.DB.prepare("INSERT INTO audit_logs(admin_id,action,new_value) VALUES(?,?,?)").bind(by, blocked ? "user_block" : "user_unblock", String(tid))
+  ]);
+}
+__name(setBlocked, "setBlocked");
+async function resetLimit(env, tid, kind, by) {
+  const col = kind === "week" ? "week_reset" : "day_reset";
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE admins SET ${col}=? WHERE telegram_id=?`).bind(now(), +tid),
+    env.DB.prepare("INSERT INTO audit_logs(admin_id,action,new_value) VALUES(?,?,?)").bind(by, "limit_reset", `${tid}: ${kind === "week" ? "неделя" : "сутки"}`)
+  ]);
+  await send(env, tid, `♻️ Ваш лимит ${kind === "week" ? "за неделю" : "за сутки"} сброшен. Можно брать аккаунты.`, [[B("🔍 Найти аккаунт", "fd")]]).catch(() => {
+  });
+}
+__name(resetLimit, "resetLimit");
+var USERS_SQL = /* @__PURE__ */ __name((w) => `SELECT a.telegram_id,a.name,a.blocked,a.last_seen,a.created_at,
+ (SELECT COUNT(*) FROM takes t WHERE t.user_id=a.telegram_id) total,
+ (SELECT COUNT(*) FROM takes t WHERE t.user_id=a.telegram_id AND t.taken_at>max(?1-86400,COALESCE(a.day_reset,0))) day,
+ (SELECT COUNT(*) FROM takes t WHERE t.user_id=a.telegram_id AND t.taken_at>max(?1-604800,COALESCE(a.week_reset,0))) week,
+ (SELECT COUNT(*) FROM accounts c WHERE c.holder_id=a.telegram_id AND c.status='green') hold,
+ (SELECT COUNT(*) FROM audit_logs l WHERE l.admin_id=a.telegram_id AND l.action='cooldown') cds
+ FROM admins a ${w} ORDER BY a.created_at`, "USERS_SQL");
+var listUsers = /* @__PURE__ */ __name(async (env) => (await env.DB.prepare(USERS_SQL("")).bind(now()).all()).results, "listUsers");
+var oneUser = /* @__PURE__ */ __name(async (env, id) => await env.DB.prepare(USERS_SQL("WHERE a.telegram_id=?2")).bind(now(), +id).first(), "oneUser");
+async function usage(env, uid, S) {
+  const u = await getUser(env, uid) || {};
+  const t = now(), df = Math.max(t - 86400, u.day_reset || 0), wf = Math.max(t - 604800, u.week_reset || 0);
+  const d = await env.DB.prepare("SELECT COUNT(*) c,MIN(taken_at) m FROM takes WHERE user_id=? AND taken_at>?").bind(uid, df).first();
+  const w = await env.DB.prepare("SELECT COUNT(*) c,MIN(taken_at) m FROM takes WHERE user_id=? AND taken_at>?").bind(uid, wf).first();
+  return { day: d.c, week: w.c, dayLimit: +S.day_limit, weekLimit: +S.week_limit, dayFree: d.m ? d.m + 86400 : null, weekFree: w.m ? w.m + 604800 : null };
+}
+__name(usage, "usage");
+async function takeAnyAccount(env, uid) {
+  const S = await cfg(env), us = await usage(env, uid, S);
+  if (us.day >= us.dayLimit || us.week >= us.weekLimit) return { limit: true, us, S };
+  for (let i = 0; i < 3; i++) {
+    const a = await env.DB.prepare("SELECT id,status FROM accounts WHERE status IN ('grey','blue') ORDER BY RANDOM() LIMIT 1").first();
+    if (!a) return { none: true };
+    const r = await env.DB.prepare("UPDATE accounts SET status='green',holder_id=?,taken_at=?,vac_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status=?").bind(uid, now(), a.id, a.status).run();
+    if (r.meta.changes) {
+      await env.DB.batch([
+        env.DB.prepare("INSERT INTO takes(user_id,account_id,taken_at) VALUES(?,?,?)").bind(uid, a.id, now()),
+        env.DB.prepare("INSERT INTO audit_logs(admin_id,account_id,action,old_value,new_value) VALUES(?,?,?,?,?)").bind(uid, a.id, "take", a.status, "green")
+      ]);
+      return { id: a.id };
+    }
+  }
+  return { none: true };
+}
+__name(takeAnyAccount, "takeAnyAccount");
+var getSt = /* @__PURE__ */ __name(async (env, u, k) => (await env.DB.prepare("SELECT v FROM states WHERE user_id=? AND k=?").bind(u, k).first())?.v ?? null, "getSt");
+var setSt = /* @__PURE__ */ __name((env, u, k, v) => env.DB.prepare("INSERT OR REPLACE INTO states(user_id,k,v) VALUES(?,?,?)").bind(u, k, v).run(), "setSt");
+var delSt = /* @__PURE__ */ __name((env, u, k) => env.DB.prepare("DELETE FROM states WHERE user_id=? AND k=?").bind(u, k).run(), "delSt");
+async function broadcast(env, text, by) {
+  const us = (await env.DB.prepare("SELECT telegram_id FROM admins WHERE blocked=0").all()).results.slice(0, 40);
+  let ok = 0;
+  await Promise.all(us.map(async (u) => {
+    try {
+      const r = await send(env, u.telegram_id, "📢 " + esc(text));
+      if (r.ok) ok++;
+    } catch (e) {
+    }
+  }));
+  await env.DB.prepare("INSERT INTO audit_logs(admin_id,action,new_value) VALUES(?,?,?)").bind(by, "broadcast", `${ok}/${us.length}`).run();
+  return { ok, total: us.length };
+}
+__name(broadcast, "broadcast");
+async function cron(env) {
+  const t = now();
+  const { results } = await env.DB.prepare("SELECT id,holder_id FROM accounts WHERE status='yellow' AND vac_until IS NOT NULL AND vac_until<=?").bind(t).all();
+  if (!results.length) return;
+  await env.DB.batch([
+    env.DB.prepare("INSERT INTO audit_logs(admin_id,account_id,action,old_value,new_value) SELECT 0,id,'status','yellow','blue (авто)' FROM accounts WHERE status='yellow' AND vac_until IS NOT NULL AND vac_until<=?").bind(t),
+    env.DB.prepare("UPDATE accounts SET status='blue',vac_until=NULL,holder_id=NULL,updated_at=CURRENT_TIMESTAMP WHERE status='yellow' AND vac_until IS NOT NULL AND vac_until<=?").bind(t)
+  ]);
+  const by = {};
+  for (const r of results) if (r.holder_id) (by[r.holder_id] ||= []).push(r.id);
+  for (const [uid, ids] of Object.entries(by).slice(0, 25)) {
+    try {
+      await send(env, uid, `🔵 Кулдаун закончился у аккаунтов: ${ids.map((i) => "#" + i).join(" ")}. Они вернулись в общий пул.`, [[B("🔍 Найти аккаунт", "fd")]]);
+    } catch (e) {
+    }
+  }
+  try {
+    await send(env, env.SUPERADMIN_ID, `🔵 Кулдаун закончился у <b>${results.length}</b> акк. — теперь «Был кулдаун».`, [[B("🔵 Открыть", "l:0:blue")]]);
+  } catch (e) {
+  }
+}
+__name(cron, "cron");
+var tg = /* @__PURE__ */ __name((env, m, b) => fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/${m}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b) }).then((r) => r.json()), "tg");
+var send = /* @__PURE__ */ __name((env, chat, text, kb, mid) => tg(env, mid ? "editMessageText" : "sendMessage", { chat_id: chat, message_id: mid, text, parse_mode: "HTML", disable_web_page_preview: true, reply_markup: kb ? { inline_keyboard: kb } : void 0 }), "send");
+var B = /* @__PURE__ */ __name((text, data) => ({ text, callback_data: data }), "B");
+var HOME = [B("🏠 Меню", "m")];
+async function showMenu(env, chat, mid, uid) {
+  if (isSuper(env, uid) && !await demoMode(env)) {
+    const c = await stats(env);
+    const kb2 = [
+      [B("📋 Все", "l:0:all"), B("⚪ Нулёвки", "l:0:grey")],
+      [B("🟢 В аренде", "l:0:green"), B("🟡 Кулдаун", "l:0:yellow")],
+      [B("🔵 Был кулдаун", "l:0:blue"), B("⚫ Баны", "l:0:black")],
+      [B("🎲 Случайный", "rm")],
+      [B("🔎 Поиск", "srch"), B("🏷 Теги", "tags")],
+      [B("👥 Пользователи", "us:0"), B("⚙️ Настройки", "cfg")],
+      [B("📊 Статистика", "st"), B("📜 Аудит", "aud")],
+      [B("⬇️ Экспорт", "exm"), B("📢 Рассылка", "bc")],
+      [B("🛟 Поддержка", "sup")]
+    ];
+    return send(env, chat, `<b>Админ-меню</b>
+⚪ Нулёвки: ${c.grey}
+🟢 В аренде: ${c.green}
+🟡 Кулдаун: ${c.yellow}
+🔵 Был кулдаун: ${c.blue}
+⚫ Баны: ${c.black}
+
+Отправьте CSV-файл, чтобы импортировать.`, kb2, mid);
+  }
+  const S = await cfg(env), us = await usage(env, uid, S);
+  const kb = [[B("🔍 Найти аккаунт", "fd")], [B("📦 Мои аккаунты", "my"), B("👤 Профиль", "pf")], [B("🛟 Поддержка", "sup")]];
+  return send(env, chat, `<b>Меню</b>
+${esc(S.bot_menu_text)}
+
+Сегодня: <b>${us.day}/${us.dayLimit}</b> · За неделю: <b>${us.week}/${us.weekLimit}</b>`, kb, mid);
+}
+__name(showMenu, "showMenu");
+function limitButtons(us, S) {
+  const kb = [];
+  if (us.day >= us.dayLimit) kb.push([B(`♻️ Сбросить сутки — ${S.price_day}`, "rs:day")]);
+  if (us.week >= us.weekLimit) kb.push([B(`♻️ Сбросить неделю — ${S.price_week}`, "rs:week")]);
+  return kb;
+}
+__name(limitButtons, "limitButtons");
+async function showLimit(env, chat, mid, x) {
+  const { us, S } = x;
+  let t = "⛔ <b>Лимит исчерпан</b>\n" + esc(S.bot_limit_text) + "\n\n";
+  t += `Сутки: ${us.day}/${us.dayLimit}` + (us.day >= us.dayLimit && us.dayFree ? ` (освободится ${left(us.dayFree)})` : "") + "\n";
+  t += `Неделя: ${us.week}/${us.weekLimit}` + (us.week >= us.weekLimit && us.weekFree ? ` (освободится ${left(us.weekFree)})` : "") + "\n\nМожно дождаться или запросить сброс:";
+  return send(env, chat, t, [...limitButtons(us, S), HOME], mid);
+}
+__name(showLimit, "showLimit");
+async function showFind(env, chat, mid, uid) {
+  const S = await cfg(env), us = await usage(env, uid, S);
+  if (us.day >= us.dayLimit || us.week >= us.weekLimit) return showLimit(env, chat, mid, { us, S });
+  const { results } = await env.DB.prepare("SELECT status,COUNT(*) c FROM accounts WHERE status IN ('grey','blue') GROUP BY status").all();
+  const c = Object.fromEntries(results.map((r) => [r.status, r.c]));
+  return send(env, chat, `🔍 <b>Найти аккаунт</b>
+Осталось сегодня: ${us.dayLimit - us.day} · на неделе: ${us.weekLimit - us.week}
+
+${esc(S.bot_find_text)}`, [
+    [B(`🎲 Получить аккаунт (${(c.grey || 0) + (c.blue || 0)})`, "tk:any")],
+    HOME
+  ], mid);
+}
+__name(showFind, "showFind");
+async function showLicense(env, chat, mid) {
+  const buttons = [[B("✅ Принять соглашение", "lic:yes")], [B("❌ Не принимать", "lic:no")]];
+  const text = `<b>📄 Лицензионное соглашение</b>
+
+Перед использованием ознакомьтесь с полным текстом соглашения:
+<a href="${LICENSE_URL}">Открыть лицензионное соглашение на сайте</a>
+
+Нажимая «Принять соглашение», вы подтверждаете согласие со всеми условиями.`;
+  return send(env, chat, text, buttons, mid);
+}
+__name(showLicense, "showLicense");
+async function showProfile(env, chat, mid, uid) {
+  const S = await cfg(env), us = await usage(env, uid, S), u = await oneUser(env, uid);
+  let t = `<b>👤 Профиль</b>
+ID: <code>${uid}</code>
+Сегодня: ${us.day}/${us.dayLimit}` + (us.dayFree && us.day >= us.dayLimit ? ` (сброс ${left(us.dayFree)})` : "") + `
+За неделю: ${us.week}/${us.weekLimit}` + (us.weekFree && us.week >= us.weekLimit ? ` (сброс ${left(us.weekFree)})` : "") + `
+Всего взято: ${u?.total || 0}
+Сейчас в аренде: ${u?.hold || 0}
+Кулдаунов: ${u?.cds || 0}`;
+  return send(env, chat, t, [...limitButtons(us, S), HOME], mid);
+}
+__name(showProfile, "showProfile");
+async function showMy(env, chat, mid, uid) {
+  const { results } = await env.DB.prepare("SELECT id,status,vac_until FROM accounts WHERE holder_id=? AND status IN ('green','yellow') ORDER BY taken_at DESC LIMIT 30").bind(uid).all();
+  const kb = results.map((a) => [B(`${ICO[a.status]} #${a.id}` + (a.status === "yellow" ? " · кулдаун " + left(a.vac_until) : ""), "a:" + a.id)]);
+  kb.push(HOME);
+  return send(env, chat, results.length ? "📦 <b>Ваши аккаунты</b>" : "У вас нет аккаунтов в аренде.", kb, mid);
+}
+__name(showMy, "showMy");
+async function showSupport(env, chat, mid) {
+  const S = await cfg(env);
+  return send(env, chat, esc(S.support_text) + "\n\nКонтакт: " + esc(S.support_contact), [HOME], mid);
+}
+__name(showSupport, "showSupport");
+async function showCd(env, chat, mid, id, uid) {
+  const kb = CD.map(([n, s]) => [B("🟡 " + n, `cd:${id}:${s}`)]);
+  if (isSuper(env, uid) && !await demoMode(env)) kb.push([B("✏️ Свой срок", "cdx:" + id)]);
+  kb.push([B("Отмена", "a:" + id)]);
+  return send(env, chat, `На сколько кулдаун у аккаунта #${id}?`, kb, mid);
+}
+__name(showCd, "showCd");
+async function fobj(env, uid, f) {

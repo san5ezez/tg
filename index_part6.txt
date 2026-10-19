@@ -1,0 +1,200 @@
+  if (p === "/webhook" && req.method === "POST") {
+    if (req.headers.get("x-telegram-bot-api-secret-token") !== env.WEBHOOK_SECRET) return new Response("forbidden", { status: 403 });
+    const u = await req.json();
+    try {
+      if (u.message) await onMessage(env, u.message);
+      else if (u.callback_query) await onCallback(env, u.callback_query);
+    } catch (e) {
+      console.error("bot", e);
+    }
+    return new Response("ok");
+  }
+  if (p === "/license") return new Response(`<html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Лицензионное соглашение</title><body style="font:16px system-ui;line-height:1.55;max-width:800px;margin:40px auto;padding:0 20px;white-space:pre-wrap"><h1>Лицензионное соглашение</h1>${esc(LICENSE_TEXT)}</body></html>`, { headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-store" } });
+  if (p === "/") return new Response(HTML, { headers: { "content-type": "text/html;charset=utf-8", "cache-control": "no-store" } });
+  if (p === "/api/login" && req.method === "POST") {
+    const b = await req.json().catch(() => ({}));
+    if (!env.WEB_PASSWORD || b.password !== env.WEB_PASSWORD || !isSuper(env, b.id)) return json({ error: "Доступ запрещён (панель только для главного админа)" }, 403);
+    const exp = now() + 86400 * 7, id = String(+b.id);
+    return json({ ok: 1 }, 200, { "set-cookie": `sid=${id}.${exp}.${await sign(env, id + "." + exp)}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=604800` });
+  }
+  if (!p.startsWith("/api/")) return new Response("Not found", { status: 404 });
+  const uid = await webUser(env, req);
+  if (!uid) return json({ error: "unauthorized" }, 401);
+  const body = /* @__PURE__ */ __name(async () => req.json().catch(() => ({})), "body");
+  if (p === "/api/me") return json({ id: uid, super: true });
+  if (p === "/api/accounts") {
+    const f = {};
+    for (const k of ["status", "q", "tag"]) if (url.searchParams.get(k)) f[k] = url.searchParams.get(k);
+    return json(await listAccounts(env, f, +url.searchParams.get("page") || 0, 25));
+  }
+  if (p === "/api/random") {
+    const a = await randomAcc(env, url.searchParams.get("status") || "grey");
+    return a ? json(a) : json({ error: "Нет подходящих аккаунтов" }, 404);
+  }
+  if (p === "/api/status" && req.method === "POST") {
+    const b = await body();
+    const ok = await setStatus(env, +b.id, b.status, uid, parseDur(b.dur));
+    return json({ ok }, ok ? 200 : 400);
+  }
+  if (p === "/api/extend" && req.method === "POST") {
+    const b = await body();
+    return json({ ok: await extendVac(env, +b.id, uid) });
+  }
+  if (p === "/api/tags" && req.method === "POST") {
+    const b = await body();
+    await setTags(env, +b.id, b.tags || "", uid);
+    return json({ ok: 1 });
+  }
+  if (p === "/api/note" && req.method === "POST") {
+    const b = await body();
+    await setNote(env, +b.id, b.note, uid);
+    return json({ ok: 1 });
+  }
+  if (p === "/api/delete" && req.method === "POST") {
+    const b = await body();
+    await delAccount(env, +b.id, uid);
+    return json({ ok: 1 });
+  }
+  if (p === "/api/stats") return json(await stats(env));
+  if (p === "/api/import" && req.method === "POST") {
+    const r = await importCSV(env, await req.text(), uid);
+    return json(r, r.error ? 400 : 200);
+  }
+  if (p === "/api/export") {
+    await env.DB.prepare("INSERT INTO audit_logs(admin_id,action,new_value) VALUES(?,?,?)").bind(uid, "export", url.searchParams.get("status") || "all").run();
+    return new Response(await exportCSV(env, url.searchParams.get("status")), { headers: { "content-type": "text/csv;charset=utf-8", "content-disposition": "attachment; filename=accounts.csv" } });
+  }
+  if (p === "/api/users") {
+    if (req.method === "GET") {
+      const S = await cfg(env);
+      return json({ limits: { day: +S.day_limit, week: +S.week_limit }, users: await listUsers(env) });
+    }
+    if (req.method === "POST") {
+      const b = await body();
+      const ok = await addUser(env, b.id, uid);
+      if (ok) send(env, b.id, "✅ Вам открыт доступ к боту. Нажмите /start").catch(() => {
+      });
+      return json({ ok });
+    }
+    if (req.method === "DELETE") return json({ ok: await delUser(env, url.searchParams.get("id"), uid) });
+  }
+  if (p === "/api/user/reset" && req.method === "POST") {
+    const b = await body();
+    await resetLimit(env, +b.id, b.kind, uid);
+    return json({ ok: 1 });
+  }
+  if (p === "/api/user/block" && req.method === "POST") {
+    const b = await body();
+    await setBlocked(env, +b.id, !!b.blocked, uid);
+    return json({ ok: 1 });
+  }
+  if (p === "/api/demo") {
+    if (req.method === "GET") return json({ enabled: await demoMode(env) });
+    if (req.method === "POST") {
+      const b = await body();
+      return json({ enabled: await setDemoMode(env, !!b.enabled, uid) });
+    }
+  }
+  if (p === "/api/settings") {
+    if (req.method === "GET") return json(await cfg(env));
+    if (req.method === "POST") {
+      const b = await body();
+      const bad = [];
+      for (const k in b) if (!await setCfg(env, k, b[k])) bad.push(k);
+      return json({ ok: !bad.length, bad }, bad.length ? 400 : 200);
+    }
+  }
+  if (p === "/api/broadcast" && req.method === "POST") {
+    const b = await body();
+    if (!b.text) return json({ error: "Пустой текст" }, 400);
+    return json(await broadcast(env, String(b.text), uid));
+  }
+  if (p === "/api/audit") return json((await env.DB.prepare("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 100").all()).results.map((a) => ({ ...a, old_value: ru(a.old_value), new_value: ru(a.new_value) })));
+  return json({ error: "not found" }, 404);
+}
+__name(route, "route");
+var index_default = {
+  async fetch(req, env) {
+    try {
+      return await route(req, env);
+    } catch (e) {
+      console.error(e);
+      return json({ error: "internal error" }, 500);
+    }
+  },
+  async scheduled(ev, env, ctx) {
+    ctx.waitUntil(cron(env));
+  }
+};
+var _a;
+var HTML = String.raw(_a || (_a = __template([`<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Accounts Admin</title>
+<style>
+:root{--bg:#0f1115;--card:#181b22;--bd:#2a2f3a;--tx:#e6e8ee;--mu:#8b92a3;--ac:#4c8dff}
+@media(prefers-color-scheme:light){:root{--bg:#f4f5f8;--card:#fff;--bd:#d9dce3;--tx:#1b1e25;--mu:#69708a}}
+*{box-sizing:border-box}body{margin:0;font:14px system-ui,sans-serif;background:var(--bg);color:var(--tx)}
+.box{max-width:340px;margin:12vh auto;padding:20px;background:var(--card);border:1px solid var(--bd);border-radius:12px;display:grid;gap:10px}
+.wrap{max-width:1200px;margin:0 auto;padding:12px}
+input,select,button,textarea{font:inherit;padding:8px 10px;border-radius:8px;border:1px solid var(--bd);background:var(--card);color:var(--tx)}
+textarea{width:100%;min-height:90px}
+button{cursor:pointer;background:var(--ac);color:#fff;border:0}button.g{background:var(--card);color:var(--tx);border:1px solid var(--bd)}button.d{background:#d64545}
+.bar{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0;align-items:center}
+.tabs button{background:var(--card);color:var(--tx);border:1px solid var(--bd)}.tabs button.on{background:var(--ac);color:#fff}
+.drop{border:2px dashed var(--bd);border-radius:10px;padding:14px;text-align:center;color:var(--mu);margin:8px 0}.drop.hv{border-color:var(--ac);color:var(--ac)}
+.tw{overflow-x:auto;border:1px solid var(--bd);border-radius:10px}table{border-collapse:collapse;width:100%;background:var(--card)}
+th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--bd);white-space:nowrap}tr.r{cursor:pointer}tr.r:hover{background:rgba(76,141,255,.08)}
+.s{padding:2px 8px;border-radius:99px;font-size:12px}.grey{background:#6b728033}.green{background:#30d15833}.yellow{background:#ffd60a33}.blue{background:#0a84ff33}.black{background:#000;color:#fff}
+.mod{position:fixed;inset:0;background:#0009;display:grid;place-items:center;padding:10px}.mc{background:var(--card);border:1px solid var(--bd);border-radius:12px;max-width:560px;width:100%;max-height:90vh;overflow:auto;padding:16px}
+.f{display:flex;gap:6px;align-items:center;margin:4px 0}.f b{min-width:130px;color:var(--mu);font-weight:500}.f code{flex:1;word-break:break-all;background:var(--bg);padding:4px 6px;border-radius:6px}
+.f button{padding:3px 8px}.lock{padding:12px;border:1px dashed var(--bd);border-radius:8px;color:var(--mu);margin:8px 0}
+.cards{display:flex;gap:10px;flex-wrap:wrap}.cards div{flex:1;min-width:140px;background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px}.cards b{font-size:26px;display:block}
+label{display:block;color:var(--mu);margin:10px 0 4px}
+</style></head><body><div id="app"></div><script>
+var $=function(s){return document.querySelector(s)};
+var FIELDS=['g2g_code_id','account_id','password','character_id','secret_question','secret_answer','first_name','last_name','account_country','date_of_birth','account_email','email_password','additional_note'];
+var LBL={grey:'⚪ Нулёвка (не брался)',green:'🟢 В аренде',yellow:'🟡 Кулдаун',blue:'🔵 Был кулдаун',black:'⚫ Бан'};
+var CD=[['20 часов',72000],['Неделя',604800],['Месяц',2592000],['Год',31536000]];
+function shown(v){return String(v==null?'':v).replace(/^'+/,'')}
+function el(t,a){var n=document.createElement(t);a=a||{};for(var k in a){if(k==='on'){for(var e in a.on)n.addEventListener(e,a.on[e])}else if(k==='cls')n.className=a[k];else n.setAttribute(k,a[k])}
+for(var i=2;i<arguments.length;i++){var c=arguments[i];if(c==null)continue;if(Array.isArray(c))c.forEach(function(x){n.append(x instanceof Node?x:String(x))});else n.append(c instanceof Node?c:String(c))}return n}
+function api(u,o){o=o||{};o.credentials='same-origin';return fetch(u,o).then(function(r){if(r.status===401){login();throw 'auth'}return r.json().catch(function(){return{}}).then(function(j){if(!r.ok)throw (j.error||(j.bad?'Неверные значения: '+j.bad.join(', '):r.status));return j})})}
+function err(e){if(e!=='auth')alert(e)}
+function post(u,b){return api(u,{method:'POST',body:JSON.stringify(b)})}
+function boot(){api('/api/me').then(dash).catch(function(e){if(e!=='auth')login()})}
+function login(){var id=el('input',{placeholder:'Telegram ID',inputmode:'numeric'}),pw=el('input',{type:'password',placeholder:'Пароль'});
+$('#app').replaceChildren(el('div',{cls:'box'},el('h2',{},'🔐 Вход'),id,pw,el('button',{on:{click:function(){post('/api/login',{id:id.value,password:pw.value}).then(boot).catch(err)}}},'Войти'),el('a',{href:'/license',target:'_blank'},'📄 Лицензионное соглашение')))}
+var S={tab:'acc',status:'',q:'',tag:'',page:0};
+function dash(){var tabs=[['acc','Аккаунты'],['usr','Пользователи'],['st','Статистика'],['cfg','Настройки'],['sup','Поддержка'],['aud','Аудит']];
+var body=el('div',{});$('#app').replaceChildren(el('div',{cls:'wrap'},el('div',{cls:'bar tabs'},tabs.map(function(t){return el('button',{cls:S.tab===t[0]?'on':'',on:{click:function(){S.tab=t[0];dash()}}},t[1])})),body));
+({acc:accs,usr:users,st:stats,cfg:settings,sup:support,aud:auds})[S.tab](body)}
+function stSelect(all,val){var o=[''].concat(Object.keys(LBL));return el('select',{},o.map(function(v){if(!v&&!all)return null;var x=el('option',{value:v},v?LBL[v]:'все статусы');if(v===val)x.selected=true;return x}))}
+function accs(root){var q=el('input',{placeholder:'Поиск…',value:S.q}),st=stSelect(true,S.status),tg=el('input',{placeholder:'тег',value:S.tag,size:8});
+function go(){S.q=q.value;S.status=st.value;S.tag=tg.value;S.page=0;load()}
+var rs=stSelect(false,'grey');rs.value='grey';
+var rb=el('button',{on:{click:function(){api('/api/random?status='+rs.value).then(modal).catch(err)}}},'🎲 Случайный');
+var tw=el('div',{cls:'tw'}),pg=el('div',{cls:'bar'}),drop=el('div',{cls:'drop'},'📂 Перетащите CSV сюда или нажмите');
+var fi=el('input',{type:'file',accept:'.csv,text/csv',style:'display:none'});
+function imp(f){if(!f)return;f.text().then(function(t){return api('/api/import',{method:'POST',body:t})}).then(function(r){alert('Добавлено '+r.added+', обновлено '+r.updated+', пропущено '+r.skipped);load()}).catch(err)}
+drop.onclick=function(){fi.click()};fi.onchange=function(){imp(fi.files[0])};
+drop.ondragover=function(e){e.preventDefault();drop.classList.add('hv')};drop.ondragleave=function(){drop.classList.remove('hv')};
+drop.ondrop=function(e){e.preventDefault();drop.classList.remove('hv');imp(e.dataTransfer.files[0])};
+root.append(el('div',{cls:'bar'},q,st,tg,el('button',{on:{click:go}},'Найти'),rs,rb,el('a',{href:'/api/export?status='+S.status},el('button',{cls:'g'},'⬇️ Экспорт CSV'))),drop,fi,tw,pg);
+q.addEventListener('keydown',function(e){if(e.key==='Enter')go()});
+function load(){var u='/api/accounts?page='+S.page+'&status='+encodeURIComponent(S.status)+'&q='+encodeURIComponent(S.q)+'&tag='+encodeURIComponent(S.tag);
+api(u).then(function(d){var th=['#','Статус','account_id','g2g','Почта','Держит','Теги','Кулдаун до'];
+tw.replaceChildren(el('table',{},el('tr',{},th.map(function(h){return el('th',{},h)})),d.rows.map(function(a){var tags=JSON.parse(a.tags||'[]').join(', ');
+return el('tr',{cls:'r',on:{click:function(){modal(a)}}},el('td',{},a.id),el('td',{},el('span',{cls:'s '+a.status},LBL[a.status])),el('td',{},shown(a.account_id)),el('td',{},shown(a.g2g_code_id)),el('td',{},shown(a.account_email)),el('td',{},a.holder_id),el('td',{},tags),el('td',{},a.vac_until?new Date(a.vac_until*1000).toLocaleString():''))})));
+var pages=Math.max(1,Math.ceil(d.total/25));pg.replaceChildren(el('button',{cls:'g',on:{click:function(){if(S.page>0){S.page--;load()}}}},'◀'),'Стр. '+(S.page+1)+'/'+pages+' · всего '+d.total,el('button',{cls:'g',on:{click:function(){if(S.page+1<pages){S.page++;load()}}}},'▶'))}).catch(err)}
+load()}
+function copy(t,b){navigator.clipboard.writeText(t).then(function(){var o=b.textContent;b.textContent='✓';setTimeout(function(){b.textContent=o},900)})}
+function modal(a){var old=document.querySelector('.mod');if(old)old.remove();
+var tags=el('input',{value:JSON.parse(a.tags||'[]').join(', '),placeholder:'теги через запятую',style:'flex:1'});
+var m=el('div',{cls:'mod',on:{click:function(e){if(e.target===m)m.remove()}}});
+function fld(k){if(!a[k])return null;var v=shown(a[k]),b=el('button',{cls:'g'},'📋');b.onclick=function(){copy(v,b)};return el('div',{cls:'f'},el('b',{},k),el('code',{},v),b)}
+function sb(s){return el('button',{cls:'g',on:{click:function(){post('/api/status',{id:a.id,status:s}).then(function(){m.remove();dash()}).catch(err)}}},LBL[s])}
+var cdSel=el('select',{},CD.map(function(c){return el('option',{value:c[1]},c[0])}));
+var both=shown(a.account_email||'')+'
+'+shown(a.email_password||'');var bb=el('button',{cls:'g'},'📋 почта+пароль');bb.onclick=function(){copy(both,bb)};
+var note=el('input',{value:a.additional_note||'',placeholder:'заметка',style:'flex:1'});
+var content=[el('h3',{},'#'+a.id+' · '+LBL[a.status]+(a.holder_id?' · держит '+a.holder_id:'')),FIELDS.map(fld),el('div',{cls:'f'},bb),
+el('div',{cls:'bar'},note,el('button',{cls:'g',on:{click:function(){post('/api/note',{id:a.id,note:note.value}).then(function(){m.remove();dash()}).catch(err)}}},'📝 Сохранить заметку')),
+el('div',{cls:'bar'},'Статус:',sb('grey'),sb('green'),sb('blue'),sb('black')),

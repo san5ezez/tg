@@ -1,0 +1,200 @@
+  if (ST.includes(f)) return { status: f };
+  if (f.startsWith("t:")) return { tag: f.slice(2) };
+  if (f === "q") {
+    const q = await getSt(env, uid, "q");
+    return /^#\d+$/.test(q || "") ? { id: +q.slice(1) } : { q };
+  }
+  return {};
+}
+__name(fobj, "fobj");
+async function showList(env, chat, mid, uid, f, page) {
+  const { total, rows } = await listAccounts(env, await fobj(env, uid, f), page);
+  const pages = Math.max(1, Math.ceil(total / PAGE));
+  const kb = rows.map((a) => [B((`${ICO[a.status]} #${a.id} ${a.account_id || a.g2g_code_id || a.account_email || ""}` + (a.holder_id ? " 👤" + a.holder_id : "")).slice(0, 60), "a:" + a.id)]);
+  const nav = [];
+  if (page > 0) nav.push(B("◀️", `l:${page - 1}:${f}`));
+  if ((page + 1) * PAGE < total) nav.push(B("▶️", `l:${page + 1}:${f}`));
+  if (nav.length) kb.push(nav);
+  kb.push(HOME);
+  return send(env, chat, `Найдено: <b>${total}</b> · стр. ${page + 1}/${pages}`, kb, mid);
+}
+__name(showList, "showList");
+async function showCard(env, chat, mid, id, uid) {
+  const a = await accById(env, id), sup = isSuper(env, uid) && !await demoMode(env);
+  if (!a) return send(env, chat, "Не найдено", [HOME], mid);
+  const own = a.holder_id === uid && (a.status === "green" || a.status === "yellow");
+  if (!sup && !own) return send(env, chat, "⛔ Нет доступа к этому аккаунту", [HOME], mid);
+  const L = sup ? ["g2g_code_id", "account_id", "password", "character_id", "secret_question", "secret_answer", "first_name", "last_name", "account_country", "date_of_birth", "additional_note"] : ["account_id", "password", "character_id", "secret_question", "secret_answer", "first_name", "last_name", "account_country", "date_of_birth"];
+  let t = `<b>#${a.id}</b> · ${TAGL(a.status)}`;
+  if (a.status === "yellow" && a.vac_until) t += `
+⏳ кулдаун до ${dt(a.vac_until)} UTC (${left(a.vac_until)})`;
+  if (sup && a.holder_id) t += `
+👤 Держит: <code>${a.holder_id}</code>` + (a.taken_at ? " с " + dt(a.taken_at) : "");
+  if (sup) {
+    const tags = JSON.parse(a.tags || "[]");
+    if (tags.length) t += "\n🏷 " + esc(tags.join(", "));
+  }
+  t += "\n\n";
+  if (sup || a.status === "green") {
+    for (const k of L) if (a[k]) t += `${k}: <code>${esc(shown(a[k]))}</code>
+`;
+    if (sup && (a.account_email || a.email_password)) {
+      t += "\n📧 <b>Почта</b>\n";
+      if (a.account_email) t += `<code>${esc(shown(a.account_email))}</code>
+`;
+      if (a.email_password) t += `<code>${esc(shown(a.email_password))}</code>
+`;
+    }
+  } else t += "Данные скрыты, пока идёт кулдаун.";
+  const kb = [];
+  if (sup) {
+    kb.push(
+      [B("⚪ Нулёвка", `s:${id}:grey`), B("🟢 В аренде", `s:${id}:green`), B("🟡 Кулдаун", `s:${id}:yellow`)],
+      [B("🔵 Был кулдаун", `s:${id}:blue`), B("⚫ Бан", `s:${id}:black`)],
+      [B("🏷 Теги", "tg:" + id), B("📝 Заметка", "nt:" + id)]
+    );
+    const r4 = [B("🎲 Ещё случайный", "rnd:" + a.status)];
+    if (a.status === "yellow") r4.push(B("⏱ +1 день", "xt:" + id));
+    kb.push(r4);
+    kb.push([B("⬅️ Список", "l:0:all"), B("🗑 Удалить", "dl:" + id)]);
+  } else {
+    if (a.status === "green") kb.push([B("🟡 Поставить кулдаун", "cdm:" + id)]);
+    kb.push([B("⬅️ Мои аккаунты", "my")]);
+  }
+  return send(env, chat, t, kb, mid);
+}
+__name(showCard, "showCard");
+async function showUsers(env, chat, mid, page) {
+  const us = await listUsers(env), S = await cfg(env);
+  const PS = 8, slice = us.slice(page * PS, page * PS + PS);
+  const kb = slice.map((u) => [B(`${u.blocked ? "🚫" : "👤"} ${u.name || u.telegram_id} · ${u.day}/${S.day_limit} · ${u.week}/${S.week_limit}`.slice(0, 60), "u:" + u.telegram_id)]);
+  const nav = [];
+  if (page > 0) nav.push(B("◀️", "us:" + (page - 1)));
+  if ((page + 1) * PS < us.length) nav.push(B("▶️", "us:" + (page + 1)));
+  if (nav.length) kb.push(nav);
+  kb.push([B("➕ Добавить пользователя", "adm_add")], HOME);
+  return send(env, chat, `<b>Пользователи</b> (${us.length})
+В кнопках: сегодня/лимит · неделя/лимит`, kb, mid);
+}
+__name(showUsers, "showUsers");
+async function showUser(env, chat, mid, id) {
+  const u = await oneUser(env, id), S = await cfg(env);
+  if (!u) return send(env, chat, "Не найден", [[B("⬅️ Пользователи", "us:0")]], mid);
+  const t = `<b>${u.blocked ? "🚫" : "👤"} ${esc(u.name || "—")}</b>
+ID: <code>${u.telegram_id}</code>
+Сегодня: ${u.day}/${S.day_limit}
+Неделя: ${u.week}/${S.week_limit}
+Всего взято: ${u.total}
+Сейчас в аренде: ${u.hold}
+Кулдаунов: ${u.cds}
+Последняя активность: ${u.last_seen ? dt(u.last_seen) + " UTC" : "—"}
+Добавлен: ${esc(u.created_at || "")}`;
+  const { results } = await env.DB.prepare("SELECT id FROM accounts WHERE holder_id=? AND status='green' LIMIT 6").bind(id).all();
+  const kb = results.map((a) => [B("🟢 Аккаунт #" + a.id, "a:" + a.id)]);
+  kb.push([B("♻️ Сброс суток", `ur:${id}:day`), B("♻️ Сброс недели", `ur:${id}:week`)], [B(u.blocked ? "✅ Разблокировать" : "🚫 Заблокировать", "ub:" + id), B("🗑 Удалить", "ud:" + id)], [B("⬅️ Пользователи", "us:0")]);
+  return send(env, chat, t, kb, mid);
+}
+__name(showUser, "showUser");
+async function showCfg(env, chat, mid) {
+  const S = await cfg(env);
+  const demo = await demoMode(env);
+  const t = "<b>⚙️ Настройки</b>\n" + CFG_KEYS.map(([k, n]) => `• ${n}: <code>${esc(S[k]).slice(0, 80)}</code>`).join("\n") + `
+• Демонстрационный режим: <b>${demo ? "включён" : "выключен"}</b>
+
+Нажмите, чтобы изменить:`;
+  const kb = CFG_KEYS.map(([k, n]) => [B("✏️ " + n, "cf:" + k)]);
+  kb.push([B(demo ? "🛑 Выключить демо-режим" : "▶️ Включить демо-режим", "demo:" + (demo ? "0" : "1"))], HOME);
+  return send(env, chat, t, kb, mid);
+}
+__name(showCfg, "showCfg");
+async function stranger(env, m, rl) {
+  const f = m.from, chat = m.chat.id;
+  const S = await cfg(env);
+  if (rl === "blocked") return send(env, chat, `⛔ Ваш доступ заблокирован.
+Поддержка: ${esc(S.support_contact)}`);
+  const welcome = esc(S.welcome_text).replace(/\{id\}/g, `<code>${f.id}</code>`);
+  await send(env, chat, welcome);
+  const last = +(await getSt(env, f.id, "notified") || 0);
+  if (now() - last > 86400) {
+    await setSt(env, f.id, "notified", String(now()));
+    await send(env, env.SUPERADMIN_ID, `🔔 Незнакомый пользователь пишет боту
+ID: <code>${f.id}</code>
+${esc(uname(f))}`, [[B("➕ Добавить", "ua:" + f.id)]]).catch(() => {
+    });
+  }
+}
+__name(stranger, "stranger");
+async function requireLicense(env, chat, uid) {
+  if (isSuper(env, uid)) return false;
+  const u = await getUser(env, uid);
+  if (!u || u.license_accepted_at) return false;
+  await showLicense(env, chat, null);
+  return true;
+}
+__name(requireLicense, "requireLicense");
+async function onMessage(env, m) {
+  const uid = m.from.id, chat = m.chat.id;
+  const rl = await roleOf(env, uid);
+  if (rl !== "super" && rl !== "user") return stranger(env, m, rl);
+  if (await requireLicense(env, chat, uid)) return;
+  await touch(env, m.from);
+  const sup = rl === "super";
+  if (m.document) {
+    if (!sup) return showMenu(env, chat, null, uid);
+    const f = await tg(env, "getFile", { file_id: m.document.file_id });
+    if (!f.ok) return send(env, chat, "❌ Не удалось получить файл");
+    const text = await (await fetch(`https://api.telegram.org/file/bot${env.BOT_TOKEN}/${f.result.file_path}`)).text();
+    const r = await importCSV(env, text, uid);
+    return send(env, chat, r.error ? "❌ " + esc(r.error) : `✅ Импорт: добавлено <b>${r.added}</b>, обновлено <b>${r.updated}</b>, пропущено <b>${r.skipped}</b>`, [HOME]);
+  }
+  const t = (m.text || "").trim();
+  if (t.startsWith("/")) {
+    await delSt(env, uid, "wait");
+    return showMenu(env, chat, null, uid);
+  }
+  const w = JSON.parse(await getSt(env, uid, "wait") || "null");
+  if (!w || !sup) return showMenu(env, chat, null, uid);
+  await delSt(env, uid, "wait");
+  if (w.t === "q") {
+    await setSt(env, uid, "q", t);
+    return showList(env, chat, null, uid, "q", 0);
+  }
+  if (w.t === "vac") {
+    const d = parseDur(t);
+    if (!d) {
+      await setSt(env, uid, "wait", JSON.stringify(w));
+      return send(env, chat, "Формат: <code>3d</code> или <code>12h</code>");
+    }
+    await setStatus(env, w.id, "yellow", uid, d);
+    return showCard(env, chat, null, w.id, uid);
+  }
+  if (w.t === "tag") {
+    await setTags(env, w.id, t, uid);
+    return showCard(env, chat, null, w.id, uid);
+  }
+  if (w.t === "note") {
+    await setNote(env, w.id, t === "-" ? "" : t, uid);
+    return showCard(env, chat, null, w.id, uid);
+  }
+  if (w.t === "adm") {
+    const ok = await addUser(env, t, uid);
+    if (ok) send(env, t, "✅ Вам открыт доступ к боту. Нажмите /start").catch(() => {
+    });
+    await send(env, chat, ok ? "✅ Пользователь добавлен" : "❌ Неверный ID");
+    return showUsers(env, chat, null, 0);
+  }
+  if (w.t === "cfg") {
+    const ok = await setCfg(env, w.k, t);
+    await send(env, chat, ok ? "✅ Сохранено" : "❌ Неверное значение (лимиты — только число ≥ 1)");
+    return showCfg(env, chat, null);
+  }
+  if (w.t === "bc") {
+    const r = await broadcast(env, t, uid);
+    return send(env, chat, `📢 Отправлено: ${r.ok}/${r.total}`, [HOME]);
+  }
+}
+__name(onMessage, "onMessage");
+var USER_OK = ["m", "my", "pf", "sup", "fd", "tk", "rs", "rs2", "a", "cdm", "cd"];
+async function onCallback(env, q) {
+  const uid = q.from.id, chat = q.message.chat.id, mid = q.message.message_id;
+  await tg(env, "answerCallbackQuery", { callback_query_id: q.id });

@@ -1,0 +1,200 @@
+  const upd = "UPDATE accounts SET " + FIELDS.map((f) => f + "=COALESCE(?," + f + ")").join(",") + ",updated_at=CURRENT_TIMESTAMP WHERE id=?";
+  const ins = "INSERT INTO accounts(" + FIELDS.join(",") + ") VALUES(" + FIELDS.map(() => "?").join(",") + ")";
+  for (const row of rows.slice(1)) {
+    const v = idx.map((i) => {
+      if (i < 0) return null;
+      const x = (row[i] ?? "").trim();
+      return x === "" || x.toUpperCase() === "NULL" ? null : x;
+    });
+    const gid = v[0], aid = v[1];
+    if (v.every((x) => x === null)) {
+      skipped++;
+      continue;
+    }
+    if (aid && seen.has("a" + aid) || gid && seen.has("g" + gid)) {
+      skipped++;
+      continue;
+    }
+    if (aid) seen.add("a" + aid);
+    if (gid) seen.add("g" + gid);
+    const id = aid && byA.get(aid) || gid && byG.get(gid);
+    if (id) {
+      st.push(env.DB.prepare(upd).bind(...v, id));
+      updated++;
+    } else {
+      st.push(env.DB.prepare(ins).bind(...v));
+      added++;
+    }
+  }
+  for (let i = 0; i < st.length; i += 80) await env.DB.batch(st.slice(i, i + 80));
+  await env.DB.prepare("INSERT INTO audit_logs(admin_id,action,new_value) VALUES(?,?,?)").bind(adminId, "import", `+${added} ~${updated} skip ${skipped}`).run();
+  return { added, updated, skipped };
+}
+__name(importCSV, "importCSV");
+async function exportCSV(env, status) {
+  const [w, p] = where(status && status !== "all" ? { status } : {});
+  const { results } = await env.DB.prepare("SELECT * FROM accounts" + w + " ORDER BY id").bind(...p).all();
+  const cols = [...FIELDS, "status", "tags", "vac_until", "holder_id"];
+  const out = [cols.join(",")];
+  for (const r of results) out.push(cols.map((c) => csvCell(c === "vac_until" && r[c] ? new Date(r[c] * 1e3).toISOString() : r[c])).join(","));
+  return out.join("\r\n");
+}
+__name(exportCSV, "exportCSV");
+async function cfg(env) {
+  const { results } = await env.DB.prepare("SELECT k,v FROM settings").all();
+  const o = { ...DEF };
+  for (const r of results) if (r.k in DEF) o[r.k] = r.v;
+  return o;
+}
+__name(cfg, "cfg");
+async function demoMode(env) {
+  return (await env.DB.prepare("SELECT v FROM settings WHERE k='demo_mode'").first())?.v === "1";
+}
+__name(demoMode, "demoMode");
+async function setDemoMode(env, enabled, by) {
+  await env.DB.batch([
+    env.DB.prepare("INSERT OR REPLACE INTO settings(k,v) VALUES('demo_mode',?)").bind(enabled ? "1" : "0"),
+    env.DB.prepare("INSERT INTO audit_logs(admin_id,action,new_value) VALUES(?,?,?)").bind(by, "demo_mode", enabled ? "on" : "off")
+  ]);
+  return enabled;
+}
+__name(setDemoMode, "setDemoMode");
+async function setCfg(env, k, v) {
+  if (!(k in DEF)) return false;
+  v = String(v ?? "").trim();
+  if (k.endsWith("_limit")) {
+    if (!/^\d{1,4}$/.test(v) || +v < 1) return false;
+  }
+  if (!v) return false;
+  await env.DB.prepare("INSERT OR REPLACE INTO settings(k,v) VALUES(?,?)").bind(k, v.slice(0, 2e3)).run();
+  return true;
+}
+__name(setCfg, "setCfg");
+function where(f) {
+  const w = [], p = [];
+  if (f.id) {
+    w.push("id=?");
+    p.push(f.id);
+  }
+  if (f.status) {
+    w.push("status=?");
+    p.push(f.status);
+  }
+  if (f.holder) {
+    w.push("holder_id=?");
+    p.push(f.holder);
+  }
+  if (f.tag) {
+    w.push("EXISTS(SELECT 1 FROM json_each(accounts.tags) WHERE value=?)");
+    p.push(f.tag);
+  }
+  if (f.q) {
+    const cs = ["account_id", "g2g_code_id", "account_email", "first_name", "last_name", "character_id", "additional_note"];
+    w.push("(" + cs.map((c) => c + " LIKE ?").join(" OR ") + ")");
+    cs.forEach(() => p.push("%" + f.q + "%"));
+  }
+  return [w.length ? " WHERE " + w.join(" AND ") : "", p];
+}
+__name(where, "where");
+async function listAccounts(env, f, page, size = PAGE) {
+  const [w, p] = where(f);
+  const total = (await env.DB.prepare("SELECT COUNT(*) c FROM accounts" + w).bind(...p).first()).c;
+  const { results } = await env.DB.prepare("SELECT * FROM accounts" + w + " ORDER BY id DESC LIMIT ? OFFSET ?").bind(...p, size, page * size).all();
+  return { total, rows: results };
+}
+__name(listAccounts, "listAccounts");
+async function accById(env, id) {
+  return env.DB.prepare("SELECT * FROM accounts WHERE id=?").bind(id).first();
+}
+__name(accById, "accById");
+function parseDur(s) {
+  if (typeof s === "number") return s > 0 ? s : 0;
+  const m = /^\s*(\d+)\s*([dhдч])/i.exec(s || "");
+  if (!m) return 0;
+  return +m[1] * (/[dд]/i.test(m[2]) ? 86400 : 3600);
+}
+__name(parseDur, "parseDur");
+async function setStatus(env, id, status, by, sec) {
+  if (!ST.includes(status)) return false;
+  const o = await env.DB.prepare("SELECT status FROM accounts WHERE id=?").bind(id).first();
+  if (!o) return false;
+  if (status === "yellow" && !sec) return false;
+  const vac = status === "yellow" ? now() + sec : null;
+  const clear = ["grey", "blue", "black"].includes(status) ? 1 : 0;
+  const action = status === "yellow" ? "cooldown" : "status";
+  await env.DB.batch([
+    env.DB.prepare("UPDATE accounts SET status=?,vac_until=?,holder_id=CASE WHEN ?=1 THEN NULL ELSE holder_id END,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(status, vac, clear, id),
+    env.DB.prepare("INSERT INTO audit_logs(admin_id,account_id,action,old_value,new_value) VALUES(?,?,?,?,?)").bind(by, id, action, o.status, status + (vac ? " до " + dt(vac) : ""))
+  ]);
+  return true;
+}
+__name(setStatus, "setStatus");
+async function extendVac(env, id, by) {
+  const r = await env.DB.prepare("UPDATE accounts SET vac_until=COALESCE(vac_until,?)+86400,updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='yellow'").bind(now(), id).run();
+  if (r.meta.changes) await env.DB.prepare("INSERT INTO audit_logs(admin_id,account_id,action,new_value) VALUES(?,?,?,?)").bind(by, id, "extend", "+1 день").run();
+  return !!r.meta.changes;
+}
+__name(extendVac, "extendVac");
+async function setNote(env, id, note, by) {
+  await env.DB.batch([
+    env.DB.prepare("UPDATE accounts SET additional_note=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(note || null, id),
+    env.DB.prepare("INSERT INTO audit_logs(admin_id,account_id,action) VALUES(?,?,?)").bind(by, id, "note")
+  ]);
+}
+__name(setNote, "setNote");
+async function delAccount(env, id, by) {
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM accounts WHERE id=?").bind(id),
+    env.DB.prepare("INSERT INTO audit_logs(admin_id,account_id,action) VALUES(?,?,?)").bind(by, id, "delete")
+  ]);
+}
+__name(delAccount, "delAccount");
+async function setTags(env, id, str, by) {
+  const tags = [...new Set(String(str).split(",").map((s) => s.trim()).filter(Boolean).map((s) => s.slice(0, 30)))].slice(0, 20);
+  await env.DB.batch([
+    env.DB.prepare("UPDATE accounts SET tags=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(JSON.stringify(tags), id),
+    env.DB.prepare("INSERT INTO audit_logs(admin_id,account_id,action,new_value) VALUES(?,?,?,?)").bind(by, id, "tags", tags.join(", "))
+  ]);
+}
+__name(setTags, "setTags");
+var randomAcc = /* @__PURE__ */ __name((env, status) => env.DB.prepare("SELECT * FROM accounts WHERE status=? ORDER BY RANDOM() LIMIT 1").bind(status).first(), "randomAcc");
+async function stats(env) {
+  const { results } = await env.DB.prepare("SELECT status,COUNT(*) c FROM accounts GROUP BY status").all();
+  const o = Object.fromEntries(ST.map((s) => [s, 0]));
+  for (const r of results) if (r.status in o) o[r.status] = r.c;
+  o.soon = (await env.DB.prepare("SELECT COUNT(*) c FROM accounts WHERE status='yellow' AND vac_until<=?").bind(now() + 86400).first()).c;
+  o.users = (await env.DB.prepare("SELECT COUNT(*) c FROM admins").first()).c;
+  o.takes24 = (await env.DB.prepare("SELECT COUNT(*) c FROM takes WHERE taken_at>?").bind(now() - 86400).first()).c;
+  return o;
+}
+__name(stats, "stats");
+var getUser = /* @__PURE__ */ __name((env, id) => env.DB.prepare("SELECT * FROM admins WHERE telegram_id=?").bind(id).first(), "getUser");
+async function roleOf(env, id) {
+  if (isSuper(env, id)) return await demoMode(env) ? "user" : "super";
+  const u = await getUser(env, id);
+  if (!u) return null;
+  return u.blocked ? "blocked" : "user";
+}
+__name(roleOf, "roleOf");
+var uname = /* @__PURE__ */ __name((f) => f.username ? "@" + f.username : [f.first_name, f.last_name].filter(Boolean).join(" "), "uname");
+async function touch(env, f) {
+  if (isSuper(env, f.id)) return;
+  await env.DB.prepare("UPDATE admins SET name=?,last_seen=? WHERE telegram_id=?").bind(uname(f), now(), f.id).run();
+}
+__name(touch, "touch");
+async function addUser(env, tid, by) {
+  if (!/^\d{4,15}$/.test(String(tid)) || isSuper(env, tid)) return false;
+  await env.DB.batch([
+    env.DB.prepare("INSERT OR IGNORE INTO admins(telegram_id,role,added_by) VALUES(?,'admin',?)").bind(+tid, by),
+    env.DB.prepare("INSERT INTO audit_logs(admin_id,action,new_value) VALUES(?,?,?)").bind(by, "user_add", String(tid))
+  ]);
+  return true;
+}
+__name(addUser, "addUser");
+async function delUser(env, tid, by) {
+  if (isSuper(env, tid)) return false;
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM admins WHERE telegram_id=?").bind(+tid),
+    env.DB.prepare("INSERT INTO audit_logs(admin_id,action,new_value) VALUES(?,?,?)").bind(by, "user_del", String(tid))
+  ]);
+  return true;

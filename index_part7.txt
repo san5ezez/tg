@@ -1,0 +1,133 @@
+el('div',{cls:'bar'},cdSel,el('button',{on:{click:function(){post('/api/status',{id:a.id,status:'yellow',dur:+cdSel.value}).then(function(){m.remove();dash()}).catch(err)}}},'🟡 Поставить кулдаун'))];
+if(a.status==='yellow')content.push(el('button',{cls:'g',on:{click:function(){post('/api/extend',{id:a.id}).then(function(){m.remove();dash()}).catch(err)}}},'⏱ +1 день'));
+content.push(el('div',{cls:'bar'},tags,el('button',{on:{click:function(){post('/api/tags',{id:a.id,tags:tags.value}).then(function(){m.remove();dash()}).catch(err)}}},'Сохранить теги')));
+content.push(el('div',{cls:'bar'},el('button',{cls:'g',on:{click:function(){api('/api/random?status='+a.status).then(modal).catch(err)}}},'🎲 Ещё случайный'),
+el('button',{cls:'d',on:{click:function(){if(confirm('Удалить #'+a.id+' навсегда?'))post('/api/delete',{id:a.id}).then(function(){m.remove();dash()}).catch(err)}}},'🗑 Удалить'),
+el('button',{cls:'g',on:{click:function(){m.remove()}}},'Закрыть')));
+m.append(el('div',{cls:'mc'},content));document.body.append(m)}
+function users(root){var inp=el('input',{placeholder:'Telegram ID',inputmode:'numeric'}),box=el('div',{});
+root.append(el('div',{cls:'bar'},inp,el('button',{on:{click:function(){post('/api/users',{id:inp.value}).then(function(r){if(!r.ok)alert('Неверный ID');dash()}).catch(err)}}},'➕ Добавить пользователя')),box);
+api('/api/users').then(function(d){var th=['ID','Имя','Сутки','Неделя','Всего','В аренде','Кулдаунов','Посл. активность',''];
+box.replaceChildren(el('div',{cls:'tw'},el('table',{},el('tr',{},th.map(function(h){return el('th',{},h)})),d.users.map(function(u){
+function bt(txt,cls,fn){return el('button',{cls:cls,on:{click:fn}},txt)}
+return el('tr',{},el('td',{},u.telegram_id),el('td',{},(u.blocked?'🚫 ':'')+(u.name||'')),el('td',{},u.day+'/'+d.limits.day),el('td',{},u.week+'/'+d.limits.week),el('td',{},u.total),el('td',{},u.hold),el('td',{},u.cds),el('td',{},u.last_seen?new Date(u.last_seen*1000).toLocaleString():''),
+el('td',{},[bt('♻️ сутки','g',function(){post('/api/user/reset',{id:u.telegram_id,kind:'day'}).then(dash).catch(err)}),' ',bt('♻️ неделя','g',function(){post('/api/user/reset',{id:u.telegram_id,kind:'week'}).then(dash).catch(err)}),' ',
+bt(u.blocked?'✅ разблок.':'🚫 блок','g',function(){post('/api/user/block',{id:u.telegram_id,blocked:!u.blocked}).then(dash).catch(err)}),' ',
+bt('🗑','d',function(){if(confirm('Удалить '+u.telegram_id+'?'))api('/api/users?id='+u.telegram_id,{method:'DELETE'}).then(dash).catch(err)})]))}))))}).catch(err)}
+function stats(root){api('/api/stats').then(function(s){function c(t,v){return el('div',{},el('b',{},v),t)}
+root.append(el('div',{cls:'cards'},c(LBL.grey,s.grey),c(LBL.green,s.green),c(LBL.yellow,s.yellow),c(LBL.blue,s.blue),c(LBL.black,s.black),c('⏰ Кулдаун кончится за 24 ч',s.soon),c('📤 Выдано за 24 ч',s.takes24),c('👥 Пользователей',s.users)))}).catch(err)}
+function form(root,keys,multi){api('/api/settings').then(function(S){var inputs={};var box=el('div',{});
+keys.forEach(function(k){var i=multi&&multi.indexOf(k[0])>=0?el('textarea',{}):el('input',{style:'width:100%'});i.value=S[k[0]];inputs[k[0]]=i;box.append(el('label',{},k[1]),i)});
+box.append(el('div',{cls:'bar'},el('button',{on:{click:function(){var b={};for(var k in inputs)b[k]=inputs[k].value;post('/api/settings',b).then(function(){alert('Сохранено')}).catch(err)}}},'💾 Сохранить')));root.append(box)}).catch(err)}
+function settings(root){var demo=el('div',{});api('/api/demo').then(function(d){var on=el('button',{cls:d.enabled?'d':'g',on:{click:function(){post('/api/demo',{enabled:!d.enabled}).then(function(x){d.enabled=x.enabled;on.textContent=d.enabled?'🛑 Выключить демо-режим':'▶️ Включить демо-режим';on.className=d.enabled?'d':'g';status.textContent=d.enabled?'Сейчас Telegram отвечает этому ID как обычному пользователю.':'Сейчас включён обычный режим администратора.'}).catch(err)}}},d.enabled?'🛑 Выключить демо-режим':'▶️ Включить демо-режим'),status=el('span',{},d.enabled?'Сейчас Telegram отвечает этому ID как обычному пользователю.':'Сейчас включён обычный режим администратора.');demo.append(el('h3',{},'🎭 Демонстрационный режим'),status,el('div',{cls:'bar'},on))}).catch(err);root.append(demo,el('h3',{},'Лимиты, цены и текст для незнакомых'));
+form(root,[['day_limit','Лимит аккаунтов в сутки'],['week_limit','Лимит аккаунтов в неделю'],['price_day','Цена сброса суточного лимита'],['price_week','Цена сброса недельного лимита'],['welcome_text','Текст, который видят незнакомые пользователи бота'],['bot_menu_text','Приветствие в меню'],['bot_find_text','Подсказка поиска'],['bot_empty_text','Текст при отсутствии аккаунтов'],['bot_limit_text','Текст при достижении лимита']],['welcome_text','bot_menu_text','bot_find_text','bot_empty_text','bot_limit_text']);
+var tx=el('textarea',{placeholder:'Текст рассылки всем пользователям'});
+root.append(el('h3',{},'📢 Рассылка'),tx,el('div',{cls:'bar'},el('button',{on:{click:function(){if(!tx.value)return;post('/api/broadcast',{text:tx.value}).then(function(r){alert('Отправлено: '+r.ok+'/'+r.total);tx.value=''}).catch(err)}}},'Отправить всем')))}
+function support(root){root.append(el('h3',{},'🛟 Поддержка'),el('div',{cls:'lock'},'Этот текст пользователи видят в разделе «Поддержка», а контакт — при покупке сброса лимитов.'));
+form(root,[['support_contact','Контакт поддержки (например @flight_san)'],['support_text','Текст раздела «Поддержка»']],['support_text'])}
+function auds(root){var box=el('div',{cls:'tw'});root.append(box);api('/api/audit').then(function(l){box.replaceChildren(el('table',{},el('tr',{},['Время','Кто','Действие','Аккаунт','Изменение'].map(function(h){return el('th',{},h)})),l.map(function(a){return el('tr',{},el('td',{},a.created_at),el('td',{},a.admin_id||'cron'),el('td',{},a.action),el('td',{},a.account_id||''),el('td',{},(a.old_value?a.old_value+' → ':'')+(a.new_value||'')))})))})}
+boot();
+<\/script></body></html>`], [`<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Accounts Admin</title>
+<style>
+:root{--bg:#0f1115;--card:#181b22;--bd:#2a2f3a;--tx:#e6e8ee;--mu:#8b92a3;--ac:#4c8dff}
+@media(prefers-color-scheme:light){:root{--bg:#f4f5f8;--card:#fff;--bd:#d9dce3;--tx:#1b1e25;--mu:#69708a}}
+*{box-sizing:border-box}body{margin:0;font:14px system-ui,sans-serif;background:var(--bg);color:var(--tx)}
+.box{max-width:340px;margin:12vh auto;padding:20px;background:var(--card);border:1px solid var(--bd);border-radius:12px;display:grid;gap:10px}
+.wrap{max-width:1200px;margin:0 auto;padding:12px}
+input,select,button,textarea{font:inherit;padding:8px 10px;border-radius:8px;border:1px solid var(--bd);background:var(--card);color:var(--tx)}
+textarea{width:100%;min-height:90px}
+button{cursor:pointer;background:var(--ac);color:#fff;border:0}button.g{background:var(--card);color:var(--tx);border:1px solid var(--bd)}button.d{background:#d64545}
+.bar{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0;align-items:center}
+.tabs button{background:var(--card);color:var(--tx);border:1px solid var(--bd)}.tabs button.on{background:var(--ac);color:#fff}
+.drop{border:2px dashed var(--bd);border-radius:10px;padding:14px;text-align:center;color:var(--mu);margin:8px 0}.drop.hv{border-color:var(--ac);color:var(--ac)}
+.tw{overflow-x:auto;border:1px solid var(--bd);border-radius:10px}table{border-collapse:collapse;width:100%;background:var(--card)}
+th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--bd);white-space:nowrap}tr.r{cursor:pointer}tr.r:hover{background:rgba(76,141,255,.08)}
+.s{padding:2px 8px;border-radius:99px;font-size:12px}.grey{background:#6b728033}.green{background:#30d15833}.yellow{background:#ffd60a33}.blue{background:#0a84ff33}.black{background:#000;color:#fff}
+.mod{position:fixed;inset:0;background:#0009;display:grid;place-items:center;padding:10px}.mc{background:var(--card);border:1px solid var(--bd);border-radius:12px;max-width:560px;width:100%;max-height:90vh;overflow:auto;padding:16px}
+.f{display:flex;gap:6px;align-items:center;margin:4px 0}.f b{min-width:130px;color:var(--mu);font-weight:500}.f code{flex:1;word-break:break-all;background:var(--bg);padding:4px 6px;border-radius:6px}
+.f button{padding:3px 8px}.lock{padding:12px;border:1px dashed var(--bd);border-radius:8px;color:var(--mu);margin:8px 0}
+.cards{display:flex;gap:10px;flex-wrap:wrap}.cards div{flex:1;min-width:140px;background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:14px}.cards b{font-size:26px;display:block}
+label{display:block;color:var(--mu);margin:10px 0 4px}
+</style></head><body><div id="app"></div><script>
+var $=function(s){return document.querySelector(s)};
+var FIELDS=['g2g_code_id','account_id','password','character_id','secret_question','secret_answer','first_name','last_name','account_country','date_of_birth','account_email','email_password','additional_note'];
+var LBL={grey:'⚪ Нулёвка (не брался)',green:'🟢 В аренде',yellow:'🟡 Кулдаун',blue:'🔵 Был кулдаун',black:'⚫ Бан'};
+var CD=[['20 часов',72000],['Неделя',604800],['Месяц',2592000],['Год',31536000]];
+function shown(v){return String(v==null?'':v).replace(/^'+/,'')}
+function el(t,a){var n=document.createElement(t);a=a||{};for(var k in a){if(k==='on'){for(var e in a.on)n.addEventListener(e,a.on[e])}else if(k==='cls')n.className=a[k];else n.setAttribute(k,a[k])}
+for(var i=2;i<arguments.length;i++){var c=arguments[i];if(c==null)continue;if(Array.isArray(c))c.forEach(function(x){n.append(x instanceof Node?x:String(x))});else n.append(c instanceof Node?c:String(c))}return n}
+function api(u,o){o=o||{};o.credentials='same-origin';return fetch(u,o).then(function(r){if(r.status===401){login();throw 'auth'}return r.json().catch(function(){return{}}).then(function(j){if(!r.ok)throw (j.error||(j.bad?'Неверные значения: '+j.bad.join(', '):r.status));return j})})}
+function err(e){if(e!=='auth')alert(e)}
+function post(u,b){return api(u,{method:'POST',body:JSON.stringify(b)})}
+function boot(){api('/api/me').then(dash).catch(function(e){if(e!=='auth')login()})}
+function login(){var id=el('input',{placeholder:'Telegram ID',inputmode:'numeric'}),pw=el('input',{type:'password',placeholder:'Пароль'});
+$('#app').replaceChildren(el('div',{cls:'box'},el('h2',{},'🔐 Вход'),id,pw,el('button',{on:{click:function(){post('/api/login',{id:id.value,password:pw.value}).then(boot).catch(err)}}},'Войти'),el('a',{href:'/license',target:'_blank'},'📄 Лицензионное соглашение')))}
+var S={tab:'acc',status:'',q:'',tag:'',page:0};
+function dash(){var tabs=[['acc','Аккаунты'],['usr','Пользователи'],['st','Статистика'],['cfg','Настройки'],['sup','Поддержка'],['aud','Аудит']];
+var body=el('div',{});$('#app').replaceChildren(el('div',{cls:'wrap'},el('div',{cls:'bar tabs'},tabs.map(function(t){return el('button',{cls:S.tab===t[0]?'on':'',on:{click:function(){S.tab=t[0];dash()}}},t[1])})),body));
+({acc:accs,usr:users,st:stats,cfg:settings,sup:support,aud:auds})[S.tab](body)}
+function stSelect(all,val){var o=[''].concat(Object.keys(LBL));return el('select',{},o.map(function(v){if(!v&&!all)return null;var x=el('option',{value:v},v?LBL[v]:'все статусы');if(v===val)x.selected=true;return x}))}
+function accs(root){var q=el('input',{placeholder:'Поиск…',value:S.q}),st=stSelect(true,S.status),tg=el('input',{placeholder:'тег',value:S.tag,size:8});
+function go(){S.q=q.value;S.status=st.value;S.tag=tg.value;S.page=0;load()}
+var rs=stSelect(false,'grey');rs.value='grey';
+var rb=el('button',{on:{click:function(){api('/api/random?status='+rs.value).then(modal).catch(err)}}},'🎲 Случайный');
+var tw=el('div',{cls:'tw'}),pg=el('div',{cls:'bar'}),drop=el('div',{cls:'drop'},'📂 Перетащите CSV сюда или нажмите');
+var fi=el('input',{type:'file',accept:'.csv,text/csv',style:'display:none'});
+function imp(f){if(!f)return;f.text().then(function(t){return api('/api/import',{method:'POST',body:t})}).then(function(r){alert('Добавлено '+r.added+', обновлено '+r.updated+', пропущено '+r.skipped);load()}).catch(err)}
+drop.onclick=function(){fi.click()};fi.onchange=function(){imp(fi.files[0])};
+drop.ondragover=function(e){e.preventDefault();drop.classList.add('hv')};drop.ondragleave=function(){drop.classList.remove('hv')};
+drop.ondrop=function(e){e.preventDefault();drop.classList.remove('hv');imp(e.dataTransfer.files[0])};
+root.append(el('div',{cls:'bar'},q,st,tg,el('button',{on:{click:go}},'Найти'),rs,rb,el('a',{href:'/api/export?status='+S.status},el('button',{cls:'g'},'⬇️ Экспорт CSV'))),drop,fi,tw,pg);
+q.addEventListener('keydown',function(e){if(e.key==='Enter')go()});
+function load(){var u='/api/accounts?page='+S.page+'&status='+encodeURIComponent(S.status)+'&q='+encodeURIComponent(S.q)+'&tag='+encodeURIComponent(S.tag);
+api(u).then(function(d){var th=['#','Статус','account_id','g2g','Почта','Держит','Теги','Кулдаун до'];
+tw.replaceChildren(el('table',{},el('tr',{},th.map(function(h){return el('th',{},h)})),d.rows.map(function(a){var tags=JSON.parse(a.tags||'[]').join(', ');
+return el('tr',{cls:'r',on:{click:function(){modal(a)}}},el('td',{},a.id),el('td',{},el('span',{cls:'s '+a.status},LBL[a.status])),el('td',{},shown(a.account_id)),el('td',{},shown(a.g2g_code_id)),el('td',{},shown(a.account_email)),el('td',{},a.holder_id),el('td',{},tags),el('td',{},a.vac_until?new Date(a.vac_until*1000).toLocaleString():''))})));
+var pages=Math.max(1,Math.ceil(d.total/25));pg.replaceChildren(el('button',{cls:'g',on:{click:function(){if(S.page>0){S.page--;load()}}}},'◀'),'Стр. '+(S.page+1)+'/'+pages+' · всего '+d.total,el('button',{cls:'g',on:{click:function(){if(S.page+1<pages){S.page++;load()}}}},'▶'))}).catch(err)}
+load()}
+function copy(t,b){navigator.clipboard.writeText(t).then(function(){var o=b.textContent;b.textContent='✓';setTimeout(function(){b.textContent=o},900)})}
+function modal(a){var old=document.querySelector('.mod');if(old)old.remove();
+var tags=el('input',{value:JSON.parse(a.tags||'[]').join(', '),placeholder:'теги через запятую',style:'flex:1'});
+var m=el('div',{cls:'mod',on:{click:function(e){if(e.target===m)m.remove()}}});
+function fld(k){if(!a[k])return null;var v=shown(a[k]),b=el('button',{cls:'g'},'📋');b.onclick=function(){copy(v,b)};return el('div',{cls:'f'},el('b',{},k),el('code',{},v),b)}
+function sb(s){return el('button',{cls:'g',on:{click:function(){post('/api/status',{id:a.id,status:s}).then(function(){m.remove();dash()}).catch(err)}}},LBL[s])}
+var cdSel=el('select',{},CD.map(function(c){return el('option',{value:c[1]},c[0])}));
+var both=shown(a.account_email||'')+'\\n'+shown(a.email_password||'');var bb=el('button',{cls:'g'},'📋 почта+пароль');bb.onclick=function(){copy(both,bb)};
+var note=el('input',{value:a.additional_note||'',placeholder:'заметка',style:'flex:1'});
+var content=[el('h3',{},'#'+a.id+' · '+LBL[a.status]+(a.holder_id?' · держит '+a.holder_id:'')),FIELDS.map(fld),el('div',{cls:'f'},bb),
+el('div',{cls:'bar'},note,el('button',{cls:'g',on:{click:function(){post('/api/note',{id:a.id,note:note.value}).then(function(){m.remove();dash()}).catch(err)}}},'📝 Сохранить заметку')),
+el('div',{cls:'bar'},'Статус:',sb('grey'),sb('green'),sb('blue'),sb('black')),
+el('div',{cls:'bar'},cdSel,el('button',{on:{click:function(){post('/api/status',{id:a.id,status:'yellow',dur:+cdSel.value}).then(function(){m.remove();dash()}).catch(err)}}},'🟡 Поставить кулдаун'))];
+if(a.status==='yellow')content.push(el('button',{cls:'g',on:{click:function(){post('/api/extend',{id:a.id}).then(function(){m.remove();dash()}).catch(err)}}},'⏱ +1 день'));
+content.push(el('div',{cls:'bar'},tags,el('button',{on:{click:function(){post('/api/tags',{id:a.id,tags:tags.value}).then(function(){m.remove();dash()}).catch(err)}}},'Сохранить теги')));
+content.push(el('div',{cls:'bar'},el('button',{cls:'g',on:{click:function(){api('/api/random?status='+a.status).then(modal).catch(err)}}},'🎲 Ещё случайный'),
+el('button',{cls:'d',on:{click:function(){if(confirm('Удалить #'+a.id+' навсегда?'))post('/api/delete',{id:a.id}).then(function(){m.remove();dash()}).catch(err)}}},'🗑 Удалить'),
+el('button',{cls:'g',on:{click:function(){m.remove()}}},'Закрыть')));
+m.append(el('div',{cls:'mc'},content));document.body.append(m)}
+function users(root){var inp=el('input',{placeholder:'Telegram ID',inputmode:'numeric'}),box=el('div',{});
+root.append(el('div',{cls:'bar'},inp,el('button',{on:{click:function(){post('/api/users',{id:inp.value}).then(function(r){if(!r.ok)alert('Неверный ID');dash()}).catch(err)}}},'➕ Добавить пользователя')),box);
+api('/api/users').then(function(d){var th=['ID','Имя','Сутки','Неделя','Всего','В аренде','Кулдаунов','Посл. активность',''];
+box.replaceChildren(el('div',{cls:'tw'},el('table',{},el('tr',{},th.map(function(h){return el('th',{},h)})),d.users.map(function(u){
+function bt(txt,cls,fn){return el('button',{cls:cls,on:{click:fn}},txt)}
+return el('tr',{},el('td',{},u.telegram_id),el('td',{},(u.blocked?'🚫 ':'')+(u.name||'')),el('td',{},u.day+'/'+d.limits.day),el('td',{},u.week+'/'+d.limits.week),el('td',{},u.total),el('td',{},u.hold),el('td',{},u.cds),el('td',{},u.last_seen?new Date(u.last_seen*1000).toLocaleString():''),
+el('td',{},[bt('♻️ сутки','g',function(){post('/api/user/reset',{id:u.telegram_id,kind:'day'}).then(dash).catch(err)}),' ',bt('♻️ неделя','g',function(){post('/api/user/reset',{id:u.telegram_id,kind:'week'}).then(dash).catch(err)}),' ',
+bt(u.blocked?'✅ разблок.':'🚫 блок','g',function(){post('/api/user/block',{id:u.telegram_id,blocked:!u.blocked}).then(dash).catch(err)}),' ',
+bt('🗑','d',function(){if(confirm('Удалить '+u.telegram_id+'?'))api('/api/users?id='+u.telegram_id,{method:'DELETE'}).then(dash).catch(err)})]))}))))}).catch(err)}
+function stats(root){api('/api/stats').then(function(s){function c(t,v){return el('div',{},el('b',{},v),t)}
+root.append(el('div',{cls:'cards'},c(LBL.grey,s.grey),c(LBL.green,s.green),c(LBL.yellow,s.yellow),c(LBL.blue,s.blue),c(LBL.black,s.black),c('⏰ Кулдаун кончится за 24 ч',s.soon),c('📤 Выдано за 24 ч',s.takes24),c('👥 Пользователей',s.users)))}).catch(err)}
+function form(root,keys,multi){api('/api/settings').then(function(S){var inputs={};var box=el('div',{});
+keys.forEach(function(k){var i=multi&&multi.indexOf(k[0])>=0?el('textarea',{}):el('input',{style:'width:100%'});i.value=S[k[0]];inputs[k[0]]=i;box.append(el('label',{},k[1]),i)});
+box.append(el('div',{cls:'bar'},el('button',{on:{click:function(){var b={};for(var k in inputs)b[k]=inputs[k].value;post('/api/settings',b).then(function(){alert('Сохранено')}).catch(err)}}},'💾 Сохранить')));root.append(box)}).catch(err)}
+function settings(root){var demo=el('div',{});api('/api/demo').then(function(d){var on=el('button',{cls:d.enabled?'d':'g',on:{click:function(){post('/api/demo',{enabled:!d.enabled}).then(function(x){d.enabled=x.enabled;on.textContent=d.enabled?'🛑 Выключить демо-режим':'▶️ Включить демо-режим';on.className=d.enabled?'d':'g';status.textContent=d.enabled?'Сейчас Telegram отвечает этому ID как обычному пользователю.':'Сейчас включён обычный режим администратора.'}).catch(err)}}},d.enabled?'🛑 Выключить демо-режим':'▶️ Включить демо-режим'),status=el('span',{},d.enabled?'Сейчас Telegram отвечает этому ID как обычному пользователю.':'Сейчас включён обычный режим администратора.');demo.append(el('h3',{},'🎭 Демонстрационный режим'),status,el('div',{cls:'bar'},on))}).catch(err);root.append(demo,el('h3',{},'Лимиты, цены и текст для незнакомых'));
+form(root,[['day_limit','Лимит аккаунтов в сутки'],['week_limit','Лимит аккаунтов в неделю'],['price_day','Цена сброса суточного лимита'],['price_week','Цена сброса недельного лимита'],['welcome_text','Текст, который видят незнакомые пользователи бота'],['bot_menu_text','Приветствие в меню'],['bot_find_text','Подсказка поиска'],['bot_empty_text','Текст при отсутствии аккаунтов'],['bot_limit_text','Текст при достижении лимита']],['welcome_text','bot_menu_text','bot_find_text','bot_empty_text','bot_limit_text']);
+var tx=el('textarea',{placeholder:'Текст рассылки всем пользователям'});
+root.append(el('h3',{},'📢 Рассылка'),tx,el('div',{cls:'bar'},el('button',{on:{click:function(){if(!tx.value)return;post('/api/broadcast',{text:tx.value}).then(function(r){alert('Отправлено: '+r.ok+'/'+r.total);tx.value=''}).catch(err)}}},'Отправить всем')))}
+function support(root){root.append(el('h3',{},'🛟 Поддержка'),el('div',{cls:'lock'},'Этот текст пользователи видят в разделе «Поддержка», а контакт — при покупке сброса лимитов.'));
+form(root,[['support_contact','Контакт поддержки (например @flight_san)'],['support_text','Текст раздела «Поддержка»']],['support_text'])}
+function auds(root){var box=el('div',{cls:'tw'});root.append(box);api('/api/audit').then(function(l){box.replaceChildren(el('table',{},el('tr',{},['Время','Кто','Действие','Аккаунт','Изменение'].map(function(h){return el('th',{},h)})),l.map(function(a){return el('tr',{},el('td',{},a.created_at),el('td',{},a.admin_id||'cron'),el('td',{},a.action),el('td',{},a.account_id||''),el('td',{},(a.old_value?a.old_value+' → ':'')+(a.new_value||'')))})))})}
+boot();
+<\/script></body></html>`])));
+export {
+  index_default as default
+};
+//# sourceMappingURL=index.js.map

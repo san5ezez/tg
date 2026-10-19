@@ -1,0 +1,200 @@
+  const rl = await roleOf(env, uid);
+  if (rl !== "super" && rl !== "user") return;
+  const sup = rl === "super";
+  const [c, ...r] = q.data.split(":");
+  if (c === "lic") {
+    if (sup) return showMenu(env, chat, mid, uid);
+    if (r[0] === "view") return showLicense(env, chat, mid);
+    if (r[0] === "yes") {
+      await env.DB.prepare("UPDATE admins SET license_accepted_at=? WHERE telegram_id=?").bind(now(), uid).run();
+      return showMenu(env, chat, mid, uid);
+    }
+    return send(env, chat, "⛔ Без принятия соглашения доступ к боту невозможен.", [[B("📄 Показать соглашение", "lic:view")]], mid);
+  }
+  if (!sup && await requireLicense(env, chat, uid)) return;
+  if (!sup && !USER_OK.includes(c)) return;
+  await touch(env, q.from);
+  await delSt(env, uid, "wait");
+  switch (c) {
+    case "m":
+      return showMenu(env, chat, mid, uid);
+    case "fd":
+      return showFind(env, chat, mid, uid);
+    case "tk": {
+      if (r[0] !== "any") return;
+      const x = await takeAnyAccount(env, uid);
+      if (x.limit) return showLimit(env, chat, mid, x);
+      if (x.none) {
+        const S = await cfg(env);
+        return send(env, chat, esc(S.bot_empty_text), [[B("🔍 Попробовать ещё раз", "fd")], [B("🛟 Поддержка", "sup")], HOME], mid);
+      }
+      return showCard(env, chat, mid, x.id, uid);
+    }
+    case "my":
+      return showMy(env, chat, mid, uid);
+    case "pf":
+      return showProfile(env, chat, mid, uid);
+    case "sup":
+      return showSupport(env, chat, mid);
+    case "rs": {
+      const S = await cfg(env), d = r[0] === "day";
+      return send(env, chat, `♻️ Сбросить лимит ${d ? "за сутки" : "за неделю"}?
+Цена: <b>${esc(d ? S.price_day : S.price_week)}</b>`, [[B("✅ Подтвердить", "rs2:" + r[0]), B("Отмена", "m")]], mid);
+    }
+    case "rs2": {
+      const S = await cfg(env), d = r[0] === "day";
+      await send(env, chat, `✅ Запрос принят.
+Для оплаты и сброса лимита (${d ? "сутки" : "неделя"}) напишите в поддержку: <b>${esc(S.support_contact)}</b>`, [HOME], mid);
+      await send(env, env.SUPERADMIN_ID, `♻️ Запрос сброса лимита (${d ? "сутки" : "неделя"})
+Пользователь: <code>${uid}</code> ${esc(uname(q.from))}`, [[B("✅ Сбросить сейчас", `rst:${uid}:${r[0]}`)]]).catch(() => {
+      });
+      return;
+    }
+    case "a":
+      return showCard(env, chat, mid, +r[0], uid);
+    case "cdm": {
+      const a = await accById(env, +r[0]);
+      if (!a) return;
+      if (!sup && !(a.holder_id === uid && a.status === "green")) return;
+      return showCd(env, chat, mid, a.id, uid);
+    }
+    case "cd": {
+      const id = +r[0], sec = +r[1], a = await accById(env, id);
+      if (!a) return;
+      const ok = sup ? sec > 0 : a.holder_id === uid && a.status === "green" && CD.some((x) => x[1] === sec);
+      if (!ok) return;
+      await setStatus(env, id, "yellow", uid, sec);
+      return showCard(env, chat, mid, id, uid);
+    }
+    // ---- только админ ----
+    case "l":
+      return showList(env, chat, mid, uid, r.slice(1).join(":"), +r[0]);
+    case "rm":
+      return send(env, chat, "🎲 Случайный аккаунт какого статуса?", [[B("⚪ Нулёвка", "rnd:grey"), B("🟢 В аренде", "rnd:green")], [B("🟡 Кулдаун", "rnd:yellow"), B("🔵 Был кулдаун", "rnd:blue")], [B("⚫ Бан", "rnd:black")], HOME], mid);
+    case "rnd": {
+      if (!ST.includes(r[0])) return;
+      const a = await randomAcc(env, r[0]);
+      if (!a) return send(env, chat, `Нет аккаунтов: ${LBL[r[0]]}`, [HOME], mid);
+      return showCard(env, chat, mid, a.id, uid);
+    }
+    case "s": {
+      if (r[1] === "yellow") return showCd(env, chat, mid, +r[0], uid);
+      await setStatus(env, +r[0], r[1], uid);
+      return showCard(env, chat, mid, +r[0], uid);
+    }
+    case "cdx":
+      await setSt(env, uid, "wait", JSON.stringify({ t: "vac", id: +r[0] }));
+      return send(env, chat, "⏳ Введите срок кулдауна: <code>3d</code> (дни) или <code>12h</code> (часы)");
+    case "xt":
+      await extendVac(env, +r[0], uid);
+      return showCard(env, chat, mid, +r[0], uid);
+    case "tg":
+      await setSt(env, uid, "wait", JSON.stringify({ t: "tag", id: +r[0] }));
+      return send(env, chat, "🏷 Введите теги через запятую (заменят текущие):");
+    case "nt":
+      await setSt(env, uid, "wait", JSON.stringify({ t: "note", id: +r[0] }));
+      return send(env, chat, "📝 Введите новую заметку (или <code>-</code> чтобы очистить):");
+    case "srch":
+      await setSt(env, uid, "wait", JSON.stringify({ t: "q" }));
+      return send(env, chat, "🔎 Введите запрос (ID, почта, имя…) или <code>#123</code> — номер аккаунта:");
+    case "tags": {
+      const { results } = await env.DB.prepare("SELECT value v,COUNT(*) c FROM accounts,json_each(accounts.tags) GROUP BY value ORDER BY c DESC LIMIT 30").all();
+      const kb = results.map((x) => [B(`${x.v} (${x.c})`, ("l:0:t:" + x.v).slice(0, 62))]);
+      kb.push(HOME);
+      return send(env, chat, results.length ? "🏷 Теги:" : "Тегов пока нет", kb, mid);
+    }
+    case "st": {
+      const s = await stats(env);
+      return send(env, chat, `<b>📊 Статистика</b>
+Всего: ${ST.reduce((n, k) => n + s[k], 0)}
+⚪ Нулёвки: ${s.grey}
+🟢 В аренде: ${s.green}
+🟡 Кулдаун: ${s.yellow}
+🔵 Был кулдаун: ${s.blue}
+⚫ Баны: ${s.black}
+
+⏰ Кулдаун закончится за 24 ч: ${s.soon}
+📤 Выдано за 24 ч: ${s.takes24}
+👥 Пользователей: ${s.users}`, [HOME], mid);
+    }
+    case "exm":
+      return send(env, chat, "Что выгрузить?", [[B("Все", "ex:all"), B("⚪ Нулёвки", "ex:grey")], [B("🟢 В аренде", "ex:green"), B("🟡 Кулдаун", "ex:yellow")], [B("🔵 Был кулдаун", "ex:blue"), B("⚫ Баны", "ex:black")], HOME], mid);
+    case "ex": {
+      const fd = new FormData();
+      fd.append("chat_id", String(chat));
+      fd.append("document", new Blob([await exportCSV(env, r[0])], { type: "text/csv" }), `accounts_${r[0]}.csv`);
+      await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/sendDocument`, { method: "POST", body: fd });
+      await env.DB.prepare("INSERT INTO audit_logs(admin_id,action,new_value) VALUES(?,?,?)").bind(uid, "export", r[0]).run();
+      return;
+    }
+    case "us":
+      return showUsers(env, chat, mid, +r[0] || 0);
+    case "u":
+      return showUser(env, chat, mid, +r[0]);
+    case "ur":
+      await resetLimit(env, +r[0], r[1], uid);
+      return showUser(env, chat, mid, +r[0]);
+    case "rst":
+      await resetLimit(env, +r[0], r[1], uid);
+      return send(env, chat, `✅ Лимит сброшен: ${r[0]}`, [[B("👤 Пользователь", "u:" + r[0])], HOME], mid);
+    case "ub": {
+      const u = await getUser(env, +r[0]);
+      if (u) await setBlocked(env, +r[0], !u.blocked, uid);
+      return showUser(env, chat, mid, +r[0]);
+    }
+    case "ud":
+      return send(env, chat, `🗑 Удалить пользователя ${r[0]}?`, [[B("Да, удалить", "ud2:" + r[0]), B("Отмена", "u:" + r[0])]], mid);
+    case "ud2":
+      await delUser(env, +r[0], uid);
+      return showUsers(env, chat, mid, 0);
+    case "ua": {
+      const ok = await addUser(env, r[0], uid);
+      if (ok) send(env, r[0], "✅ Вам открыт доступ к боту. Нажмите /start").catch(() => {
+      });
+      return send(env, chat, ok ? `✅ Пользователь ${r[0]} добавлен` : "Не удалось добавить", [[B("👥 Пользователи", "us:0")]], mid);
+    }
+    case "adm_add":
+      await setSt(env, uid, "wait", JSON.stringify({ t: "adm" }));
+      return send(env, chat, "➕ Отправьте Telegram ID нового пользователя:");
+    case "cfg":
+      return showCfg(env, chat, mid);
+    case "demo": {
+      await setDemoMode(env, r[0] === "1", uid);
+      return showCfg(env, chat, mid);
+    }
+    case "cf": {
+      if (!CFG_KEYS.some((x) => x[0] === r[0])) return;
+      await setSt(env, uid, "wait", JSON.stringify({ t: "cfg", k: r[0] }));
+      return send(env, chat, `✏️ Введите новое значение: <b>${CFG_KEYS.find((x) => x[0] === r[0])[1]}</b>` + (r[0].endsWith("_limit") ? "\n(число)" : ""));
+    }
+    case "bc":
+      await setSt(env, uid, "wait", JSON.stringify({ t: "bc" }));
+      return send(env, chat, "📢 Введите текст рассылки для всех пользователей:");
+    case "dl":
+      return send(env, chat, `🗑 Удалить аккаунт #${r[0]} навсегда?`, [[B("Да, удалить", "dl2:" + r[0]), B("Отмена", "a:" + r[0])]], mid);
+    case "dl2":
+      await delAccount(env, +r[0], uid);
+      return send(env, chat, "🗑 Удалено", [HOME], mid);
+    case "aud": {
+      const { results } = await env.DB.prepare("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 15").all();
+      return send(env, chat, "<b>Последние действия</b>\n" + (results.map((a) => `${a.created_at.slice(5, 16)} · ${a.admin_id || "cron"} · ${a.action}${a.account_id ? " #" + a.account_id : ""} ${esc(a.old_value ? ru(a.old_value) + "→" : "")}${esc(ru(a.new_value || ""))}`).join("\n") || "—"), [HOME], mid);
+    }
+  }
+}
+__name(onCallback, "onCallback");
+var te = new TextEncoder();
+async function sign(env, s) {
+  const k = await crypto.subtle.importKey("raw", te.encode(env.BOT_TOKEN + "|" + env.WEB_PASSWORD), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return [...new Uint8Array(await crypto.subtle.sign("HMAC", k, te.encode(s)))].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+__name(sign, "sign");
+async function webUser(env, req) {
+  const m = /(?:^|; )sid=([^;]+)/.exec(req.headers.get("cookie") || "");
+  if (!m) return null;
+  const [id, exp, sig] = m[1].split(".");
+  if (!id || +exp < now() || sig !== await sign(env, id + "." + exp)) return null;
+  return isSuper(env, id) ? +id : null;
+}
+__name(webUser, "webUser");
+async function route(req, env) {
+  const url = new URL(req.url), p = url.pathname;
